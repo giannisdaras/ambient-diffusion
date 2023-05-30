@@ -1,5 +1,5 @@
 from transformers import T5EncoderModel
-from diffusers import DiffusionPipeline
+from pipeline_if import IFPipeline as DiffusionPipeline
 import gc
 import torch
 from dnnlib.util import save_images, save_image
