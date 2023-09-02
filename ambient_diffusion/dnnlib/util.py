@@ -31,7 +31,7 @@ import uuid
 from distutils.util import strtobool
 from typing import Any, List, Tuple, Union, Optional
 import s3fs
-from torch_utils import distributed as dist
+from ambient_diffusion.torch_utils import distributed as dist
 import torch
 import PIL
 from torchvision import transforms

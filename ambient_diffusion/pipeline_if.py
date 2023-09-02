@@ -751,11 +751,9 @@ class IFPipeline(DiffusionPipeline):
         callback_steps: int = 1,
         clean_caption: bool = True,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
-        corruption_probability: float = 0.0,
-        delta_probability: float = 0.0,
         num_rounds = 1.0,
         masks_guidance_scale=0.0,
-        corruption_pattern="dust",
+        operator=None,
     ):
         """
         Function invoked when calling the pipeline for generation.
@@ -818,7 +816,6 @@ class IFPipeline(DiffusionPipeline):
                 A kwargs dictionary that if specified is passed along to the `AttentionProcessor` as defined under
                 `self.processor` in
                 [diffusers.cross_attention](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/cross_attention.py).
-            corruption_probability (`float`, *optional*, defaults to 0.0): The probability of applying a corruption.
         Examples:
 
         Returns:
@@ -895,32 +892,41 @@ class IFPipeline(DiffusionPipeline):
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         keep_index = 300
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            mask = None
+            operator_params = None
 
             for i, t in enumerate(timesteps):
                 model_input = (
                     torch.cat([intermediate_images] * 2) if do_classifier_free_guidance else intermediate_images
                 )
-                if mask is None:
-                    if corruption_pattern == "dust":
-                        corruption_mask = get_random_mask(model_input.shape, 1 - corruption_probability, device=device, mask_full_rgb=True)
-                        extra_mask = get_random_mask(model_input.shape, 1 - delta_probability, device=device, mask_full_rgb=True)
-                    elif corruption_pattern == "fixed_box":
-                        # BOX corruption
-                        patch_size = int((corruption_probability) * model_input.shape[-2])
-                        corruption_mask = 1 - get_patch_mask(model_input.shape, patch_size, same_for_all_batch=False)
-                        extra_mask = 1 - get_patch_mask(model_input.shape, patch_size, same_for_all_batch=False)
-                    else:
-                        raise NotImplementedError(f"Corruption pattern {corruption_pattern} not implemented")
-                    mask = corruption_mask * extra_mask
-                corrupted_model_input = (model_input * mask).to(model_input.dtype)
+                # if mask is None:
+                #     if corruption_pattern == "dust":
+                #         corruption_mask = get_random_mask(model_input.shape, 1 - corruption_probability, device=device, mask_full_rgb=True)
+                #         extra_mask = get_random_mask(model_input.shape, 1 - delta_probability, device=device, mask_full_rgb=True)
+                #     elif corruption_pattern == "fixed_box":
+                #         # BOX corruption
+                #         patch_size = int((corruption_probability) * model_input.shape[-2])
+                #         corruption_mask = 1 - get_patch_mask(model_input.shape, patch_size, same_for_all_batch=False)
+                #         extra_mask = 1 - get_patch_mask(model_input.shape, patch_size, same_for_all_batch=False)
+                #     else:
+                #         raise NotImplementedError(f"Corruption pattern {corruption_pattern} not implemented")
+                #     mask = corruption_mask * extra_mask
+                if operator_params is None:
+                    _, operator_params = operator.corrupt(model_input)
+                    _, hat_operator_params = operator.hat_corrupt(model_input, operator_params)
+                                
+                # corrupted_model_input = (model_input * mask).to(model_input.dtype)
+                corrupted_model_input = operator.hat_corrupt(model_input, operator_params, hat_operator_params)[0].to(model_input.dtype)
+
                 # predict the noise residual
                 noise_pred = self.unet(corrupted_model_input, t, encoder_hidden_states=prompt_embeds, cross_attention_kwargs=cross_attention_kwargs, return_dict=False)[0]
 
                 alpha_prod_t = self.scheduler.alphas_cumprod[t]
                 beta_prod_t = 1 - alpha_prod_t
                 model_output, predicted_variance = torch.split(noise_pred, model_input.shape[1], dim=1)
-                pred_original_sample = mask * (model_input - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5) + (1 - mask) * model_output
+                # pred_original_sample = hat_operator_params * (model_input - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5) + (1 - hat_operator_params) * model_output
+                pred_original_sample = (model_input - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
+
+
                 pred_original_sample = self.scheduler._threshold_sample(pred_original_sample)
                 intermediate_images = self.scheduler.step(noise_pred, t, intermediate_images, **extra_step_kwargs, return_dict=False, clean_image=pred_original_sample,)[0].to(model_input.dtype)
 

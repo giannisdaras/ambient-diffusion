@@ -10,6 +10,7 @@ import numpy as np
 import dnnlib
 import click
 from tqdm import tqdm
+from torch_utils.ambient_diffusion import get_operator
 
 def flush():
   gc.collect()
@@ -27,10 +28,18 @@ def flush():
 @click.option('--save_separate', is_flag=True, help='Save separate', default=True)
 @click.option('--corruption_probability', type=float, help='Corruption probability', default=0.8)
 @click.option('--delta_probability', type=float, help='Delta probability', default=0.1)
+@click.option('--downsampling_factor', type=int, help='Downsampling factor', default=4)
 @click.option('--corruption_pattern', type=str, help='Corruption pattern', default="dust")
 
-def main(upscale, checkpoint_path, output_dir, batch_size, num_images, batch_resume_index, save_collage, save_separate, corruption_probability, delta_probability, corruption_pattern):
+
+def main(upscale, checkpoint_path, output_dir, batch_size, num_images, batch_resume_index, save_collage, 
+        save_separate, corruption_probability, delta_probability, downsampling_factor, corruption_pattern):
     os.makedirs(output_dir, exist_ok=True)
+
+    operator = get_operator(corruption_pattern=corruption_pattern, 
+                    corruption_probability=corruption_probability, delta_probability=delta_probability,
+                    downsampling_factor=downsampling_factor)
+
     text_encoder = T5EncoderModel.from_pretrained(
         "DeepFloyd/IF-I-XL-v1.0",
         subfolder="text_encoder", 
@@ -78,10 +87,8 @@ def main(upscale, checkpoint_path, output_dir, batch_size, num_images, batch_res
             prompt_embeds=prompt_embeds,
             negative_prompt_embeds=negative_embeds, 
             output_type="pt",
-            corruption_probability=corruption_probability,
-            delta_probability=delta_probability,
             guidance_scale=0.0,
-            corruption_pattern=corruption_pattern,
+            operator=operator,
             ).images
 
         if save_separate:

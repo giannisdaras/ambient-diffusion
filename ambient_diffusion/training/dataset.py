@@ -14,7 +14,8 @@ import PIL.Image
 import json
 import torch
 import dnnlib
-from torch_utils.ambient_diffusion import get_box_mask, get_patch_mask, get_hat_patch_mask
+from torch_utils.ambient_diffusion import get_operator
+# get_box_mask, get_patch_mask, get_hat_patch_mask
 from dnnlib.util import create_down_up_matrix, sample_ratio
 
 try:
@@ -38,11 +39,11 @@ class Dataset(torch.utils.data.Dataset):
         delta_probability = 0.,  # Probability to corrupt further an already corrupted image.
         mask_full_rgb = False,
         corruption_pattern = "dust",
-        ratios = [1.0, 0.8, 0.6, 0.4, 0.2, 0.1],  # potential downsampling ratios,
+        downsampling_factor = 8, # Downsampling factor for averaging forward operator.
         normalize=True,
     ):
-        assert corruption_pattern in ["dust", "box", "fixed_box", "keep_patch"], \
-            "corruption_pattern must be either 'dust', 'box', 'keep_patch', or 'fixed_box'"
+        assert corruption_pattern in ["dust", "box", "fixed_box", "keep_patch", "averaging"], \
+            "corruption_pattern must be either 'dust', 'box', 'keep_patch', 'averaging' or 'fixed_box'"
         self._name = name
         self._raw_shape = list(raw_shape)
         self._use_labels = use_labels
@@ -54,7 +55,7 @@ class Dataset(torch.utils.data.Dataset):
         self.delta_probability = delta_probability
         self.mask_full_rgb = mask_full_rgb
         self.corruption_pattern = corruption_pattern
-        self.ratios = ratios
+        self.downsampling_factor = downsampling_factor
         self.normalize = normalize
 
         # Apply max_size.
@@ -122,38 +123,16 @@ class Dataset(torch.utils.data.Dataset):
         torch.manual_seed(raw_idx)
         if self.normalize:
             image = image.astype(np.float32) / 127.5 - 1
-        if self.corruption_pattern == "dust":
-            if self.mask_full_rgb:
-                corruption_mask = np.random.binomial(1, 1 - self.corruption_probability, size=image.shape[1:]).astype(np.float32)
-                corruption_mask = corruption_mask[np.newaxis, :, :].repeat(image.shape[0], axis=0)
-                extra_mask = np.random.binomial(1, 1 - self.delta_probability, size=image.shape[1:]).astype(np.float32)
-                extra_mask = extra_mask[np.newaxis, :, :].repeat(image.shape[0], axis=0)
-                hat_corruption_mask = np.minimum(corruption_mask, extra_mask)
-            else:
-                corruption_mask = np.random.binomial(1, 1 - self.corruption_probability, size=image.shape).astype(np.float32)
-                hat_corruption_mask = np.minimum(corruption_mask, np.random.binomial(1, 1 - self.delta_probability, size=image.shape).astype(np.float32))
-        elif self.corruption_pattern == "box":
-            corruption_mask = get_box_mask((1,) + image.shape, 1 - self.corruption_probability, same_for_all_batch=False, device='cpu')[0]
-            hat_corruption_mask = get_box_mask((1,) + image.shape, 1 - self.corruption_probability, same_for_all_batch=False, device='cpu')[0]
-            hat_corruption_mask = corruption_mask * hat_corruption_mask
-        elif self.corruption_pattern == "fixed_box":
-            patch_size = int((self.corruption_probability) * image.shape[-2])
-            corruption_mask = 1 - get_patch_mask((1,) + image.shape, patch_size, same_for_all_batch=False, device='cpu')[0]
-            if self.delta_probability > 0:
-                hat_corruption_mask = 1 - get_patch_mask((1,) + image.shape, patch_size, same_for_all_batch=False, device='cpu')[0]
-                hat_corruption_mask = corruption_mask * hat_corruption_mask
-            else:
-                hat_corruption_mask = corruption_mask
-        elif self.corruption_pattern == "keep_patch":
-            patch_size = int((1 - self.corruption_probability) * image.shape[-2])
-            corruption_mask = get_patch_mask((1,) + image.shape, patch_size, same_for_all_batch=False, device='cpu')
-            hat_patch_size =  int((1 - self.delta_probability) * patch_size)
-            hat_corruption_mask = get_hat_patch_mask(corruption_mask, patch_size, hat_patch_size, same_for_all_batch=False, device='cpu')[0]
-            corruption_mask = corruption_mask[0]
-        else:
-            raise NotImplementedError("Corruption pattern not implemented")
+
+
+        operator = get_operator(corruption_pattern=self.corruption_pattern, 
+                            corruption_probability=self.corruption_probability, delta_probability=self.delta_probability, 
+                            downsampling_factor=self.downsampling_factor)
+        corrupted_image, operator_params = operator.corrupt(torch.tensor(image[np.newaxis]))
+        _, hat_operator_params = operator.hat_corrupt(corrupted_image, operator_params)
+        return image.copy(), self.get_label(idx), operator_params.numpy()[0], hat_operator_params.numpy()[0]
+
             
-        return image.copy(), self.get_label(idx), corruption_mask, hat_corruption_mask
 
     def get_label(self, idx):
         label = self._get_raw_labels()[self._raw_idx[idx]]

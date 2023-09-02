@@ -10,7 +10,7 @@ import contextlib
 import numpy as np
 import torch
 import warnings
-import dnnlib
+import ambient_diffusion.dnnlib
 import PIL
 import wandb
 from collections import OrderedDict

@@ -42,7 +42,7 @@ from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
 from diffusers.utils import check_min_version, is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
-from torch_utils.ambient_diffusion import get_random_mask, get_patch_mask
+from torch_utils.ambient_diffusion import get_operator
 import dnnlib
 from training.dataset import ImageFolderDataset
 from dnnlib.util import save_image, save_images
@@ -363,9 +363,15 @@ def parse_args():
             " more information see https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator"
         ),
     )
+
+    parser.add_argument('--corruption_pattern', type=str, help='Corruption pattern', default='dust', choices=['dust', 'fixed_box', 'averaging'])
+    
+    # parameters for forward operators
     parser.add_argument("--corruption_probability", type=float, default=0.4, help="Probability of a missing pixel.")
     parser.add_argument("--delta_probability", type=float, default=0.1, help="Probability of corrupting an existing pixel.")
-    parser.add_argument('--corruption_pattern', type=str, help='Corruption pattern', default='dust')
+    parser.add_argument("--downsampling_factor", type=int, default=8, help="Downsampling factor for corrupted images using the averaging operator.")
+    
+
 
     args = parser.parse_args()
     args.validation_prompts = args.validation_prompts.split(",")
@@ -524,6 +530,11 @@ def main():
         eps=args.adam_epsilon,
     )
 
+    operator = get_operator(corruption_pattern=args.corruption_pattern, 
+                        corruption_probability=args.corruption_probability, delta_probability=args.delta_probability,
+                        downsampling_factor=args.downsampling_factor)
+
+
     # Get the datasets: you can either provide your own training and evaluation files (see below)
     # or specify a Dataset from the hub (the dataset will be downloaded automatically from the datasets Hub).
 
@@ -585,34 +596,21 @@ def main():
                     transforms.Normalize([0.5], [0.5]),
                 ]
             )
-
+            
             def preprocess_train(examples):
                 images = [image.convert("RGB") for image in examples[image_column]]
                 examples["pixel_values"] = [train_transforms(image) for image in images]
 
                 if not args.empty_text:
                     examples["input_ids"] = tokenize_captions(examples)
-                image_shape = (len(examples["pixel_values"]), 3, 64, 64)
-                if args.corruption_pattern == 'dust':
-                    corruption_mask = get_random_mask(
-                        (len(examples["pixel_values"]), 3, 64, 64), survival_probability=1 - args.corruption_probability,
-                        mask_full_rgb=True)
-                    extra_mask = get_random_mask((len(examples["pixel_values"]), 3, 64,  64), survival_probability=1 - args.delta_probability,
-                                                mask_full_rgb=True)
-                elif args.corruption_pattern == 'fixed_box':
-                    patch_size = int((args.corruption_probability) * image_shape[-2])
-                    corruption_mask = 1 - get_patch_mask(image_shape, patch_size, same_for_all_batch=False)
-                    if args.delta_probability > 0:
-                        extra_mask = 1 - get_patch_mask(image_shape, patch_size, same_for_all_batch=False)
-                    else:
-                        extra_mask = corruption_mask
+                corrupted_values, operator_params = operator.corrupt(examples["pixel_values"])
+                _, hat_operator_params = operator.hat_corrupt(examples["pixel_values"], operator_params)
 
-                else:
-                    raise NotImplementedError(f"Unknown corruption pattern: {args.corruption_pattern}")
-                hat_corruption_mask = extra_mask * corruption_mask
-                examples["corruption_masks"] = [mask for mask in corruption_mask]
-                examples["hat_corruption_masks"] = [mask for mask in hat_corruption_mask]
-
+                examples["corrupted_values"] = [corrupted_value for corrupted_value in corrupted_values]
+                examples["operator_params"] = [param for param in operator_params]
+                examples["operator_hat_params"] = [hat_param for hat_param in hat_operator_params]
+                
+                del examples["pixel_values"]
                 return examples
 
             with accelerator.main_process_first():
@@ -623,20 +621,24 @@ def main():
                 train_dataset = dataset["train"].with_transform(preprocess_train)
 
             def collate_fn(examples):
-                pixel_values = torch.stack([example["pixel_values"] for example in examples])
-                pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+                corrupted_values = torch.stack([example["corrupted_values"] for example in examples])
+                corrupted_values = corrupted_values.to(memory_format=torch.contiguous_format).float()
 
                 if not args.empty_text:
                     input_ids = torch.stack([example["input_ids"] for example in examples])
                 else:
                     input_ids = None
-                corruption_masks = torch.stack([example["corruption_masks"] for example in examples])
-                corruption_masks = corruption_masks.to(memory_format=torch.contiguous_format).float()
                 
-                hat_corruption_masks = torch.stack([example["hat_corruption_masks"] for example in examples])
-                hat_corruption_masks = hat_corruption_masks.to(memory_format=torch.contiguous_format).float()
+                operator_params = torch.stack([example["operator_params"] for example in examples])
+                operator_params = operator_params.to(memory_format=torch.contiguous_format).float()
 
-                return {"pixel_values": pixel_values, "input_ids": input_ids, "corruption_masks": corruption_masks, "hat_corruption_masks": hat_corruption_masks}
+                operator_hat_params = torch.stack([example["operator_hat_params"] for example in examples])
+                operator_hat_params = operator_hat_params.to(memory_format=torch.contiguous_format).float()
+
+                return {"corrupted_values": corrupted_values, 
+                        "operator_params": operator_params, 
+                        "operator_hat_params": operator_hat_params,
+                        "input_ids": input_ids}
     else:
         train_dataset = ImageFolderDataset(path=args.train_data_dir, max_size=args.max_train_samples, random_seed=args.seed, 
                                     corruption_probability=args.corruption_probability, delta_probability=args.delta_probability,
@@ -645,14 +647,18 @@ def main():
             pixel_values = torch.stack([torch.tensor(example[0]) for example in examples])
             pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-            corruption_matrix = torch.stack([torch.tensor(example[2]) for example in examples])
-            corruption_masks = corruption_matrix.to(memory_format=torch.contiguous_format).float()
+            operator_params = torch.stack([torch.tensor(example[2]) for example in examples])
+            operator_params = operator_params.to(memory_format=torch.contiguous_format).float()
 
-            hat_corruption_matrix = torch.stack([torch.tensor(example[3]) for example in examples])
-            hat_corruption_masks = hat_corruption_matrix.to(memory_format=torch.contiguous_format).float()
-            return {"pixel_values": pixel_values, "input_ids": None, "corruption_masks": corruption_masks, "hat_corruption_masks": hat_corruption_masks}
+            operator_hat_params = torch.stack([torch.tensor(example[3]) for example in examples])
+            operator_hat_params = operator_hat_params.to(memory_format=torch.contiguous_format).float()
 
+            corrupted_values, _ = operator.corrupt(pixel_values, operator_params)
 
+            return {"corrupted_values": corrupted_values, 
+                    "operator_params": operator_params, 
+                    "operator_hat_params": operator_hat_params,
+                    "input_ids": None}
 
     # DataLoaders creation:
     train_dataloader = torch.utils.data.DataLoader(
@@ -747,8 +753,6 @@ def main():
         unet.train()
         train_loss = 0.0
         test_loss = 0.0
-        unobserved_loss = 0.0
-        loss_on_hat_pixels = 0.0
         for step, batch in enumerate(train_dataloader):
             # Skip steps until we reach the resumed step
             if args.resume_from_checkpoint and epoch == first_epoch and step < resume_step:
@@ -757,42 +761,41 @@ def main():
                 continue
 
             with accelerator.accumulate(unet):
-                latents = batch["pixel_values"]
+                corrupted_values = batch["corrupted_values"]
+                hat_corrupted_values = operator.hat_corrupt(corrupted_values, batch["operator_params"])[0]
 
                 # Sample noise that we'll add to the latents
-                noise = torch.randn_like(latents)
+                noise = torch.randn_like(corrupted_values)
                 if args.noise_offset:
                     # https://www.crosslabs.org//blog/diffusion-with-offset-noise
                     noise += args.noise_offset * torch.randn(
-                        (latents.shape[0], latents.shape[1], 1, 1), device=latents.device
+                        (corrupted_values.shape[0], corrupted_values.shape[1], 1, 1), device=corrupted_values.device
                     )
 
-                bsz = latents.shape[0]
+                bsz = corrupted_values.shape[0]
                 # Sample a random timestep for each image
-                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
+                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=corrupted_values.device)
                 timesteps = timesteps.long()
-
-                # Add noise to the latents according to the noise magnitude at each timestep
-                # (this is the forward diffusion process)
                 
-                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-                noisy_latents = batch["hat_corruption_masks"] * noisy_latents
+                # add noise
+                noisy_corrupted_values = noise_scheduler.add_noise(corrupted_values, operator.corrupt(noise, batch["operator_params"])[0], timesteps)
+                # corrupt further
+                noisy_hat_corrupted_values, operator_hat_params = operator.hat_corrupt(noisy_corrupted_values, batch["operator_params"])
 
                 if not args.empty_text:
                     # Get the text embedding for conditioning
                     encoder_hidden_states = text_encoder(batch["input_ids"])[0]
                 else:
-                    encoder_hidden_states = empty_embeds.repeat([noisy_latents.shape[0], 1, 1])
+                    encoder_hidden_states = empty_embeds.repeat([noisy_hat_corrupted_values.shape[0], 1, 1])
 
                 if step == 0:
                     try:
                         os.makedirs(os.path.join(args.output_dir, "artifacts"), exist_ok=True)
                         save_dir = os.path.join(args.output_dir, "artifacts")
                         num_rows = int(np.sqrt(bsz))
-                        save_images((batch["pixel_values"]), os.path.join(save_dir, f"dataset.png"), num_rows=num_rows, num_cols=num_rows)
-                        save_images((batch["pixel_values"] * batch["corruption_masks"]), 
+                        save_images(corrupted_values, 
                                     os.path.join(save_dir, f"dataset_corrupted.png"), num_rows=num_rows, num_cols=num_rows)
-                        save_images((batch["pixel_values"] * batch["hat_corruption_masks"]), 
+                        save_images(hat_corrupted_values, 
                                     os.path.join(save_dir, f"dataset_hat_corrupted.png"), num_rows=num_rows, num_cols=num_rows)
                     except:
                         print("Can't save images. Is batch size a square number?")
@@ -806,14 +809,17 @@ def main():
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 # Predict the noise residual and compute loss
-                noise_pred_all = unet(noisy_latents, timesteps, encoder_hidden_states.to(noisy_latents.dtype)).sample
+                noise_pred_all = unet(noisy_hat_corrupted_values, timesteps, encoder_hidden_states.to(noisy_hat_corrupted_values.dtype)).sample
 
                 # get the clean image from the prediction
                 alpha_prod_t = noise_scheduler.alphas_cumprod[timesteps.cpu()].reshape(-1, 1, 1, 1).to(accelerator.device)
                 beta_prod_t = 1 - alpha_prod_t
-                noise_pred, predicted_variance = torch.split(noise_pred_all, noisy_latents.shape[1], dim=1)
-                pred_original_sample = batch["hat_corruption_masks"] * (noisy_latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5) + (1 - batch["hat_corruption_masks"]) * noise_pred
-                
+                noise_pred, predicted_variance = torch.split(noise_pred_all, noisy_hat_corrupted_values.shape[1], dim=1)
+
+                # TODO(giannisdaras): not clear how to generalize this
+                pred_original_sample = operator_hat_params * (noisy_hat_corrupted_values - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5) + (1 - operator_hat_params) * noise_pred
+                # pred_original_sample = (noisy_hat_corrupted_values - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
+
                 if step == 0:
                     exp_name = args.output_dir.split("/")[-1]
                     try:
@@ -821,31 +827,20 @@ def main():
                         save_dir = os.path.join(args.output_dir, "artifacts")
                         save_images(pred_original_sample, 
                                     os.path.join(save_dir, f"{exp_name}_predictions_{global_step}.png"), num_rows=num_rows, num_cols=num_rows)
-                        save_images(noisy_latents, 
-                                    os.path.join(save_dir, f"{exp_name}_noisy_latents_{global_step}.png"), num_rows=num_rows, num_cols=num_rows)
-                        save_images(latents, 
-                                    os.path.join(save_dir, f"{exp_name}_latents_{global_step}.png"), num_rows=num_rows, num_cols=num_rows)
+                        save_images(noisy_hat_corrupted_values, 
+                                    os.path.join(save_dir, f"{exp_name}_input_{global_step}.png"), num_rows=num_rows, num_cols=num_rows)
                     except:
                         print("Can't save images. Is batch size a square number?")
 
-                loss = F.mse_loss((batch["corruption_masks"] * pred_original_sample).float(), (batch["corruption_masks"] * batch["pixel_values"]).float(), reduction="mean")
-                with torch.no_grad():
-                    test_loss = F.mse_loss(pred_original_sample.float(), batch["pixel_values"].float(), reduction="mean")
-                    unobserved_loss = F.mse_loss((1 - batch["corruption_masks"]) * pred_original_sample, (1 - batch["corruption_masks"]) * batch["pixel_values"], reduction="mean")
-
-                    # get the pixels for which corruption mask is 1 (visible) but hat_corruption_mask is 0 (unobserved)
-                    loss_on_hat_pixels = F.mse_loss(( batch["corruption_masks"] * (1 - batch["hat_corruption_masks"]) * pred_original_sample).float(), 
-                        (batch["corruption_masks"] * (1 - batch["hat_corruption_masks"]) * batch["pixel_values"]).float(), reduction="mean")
+                loss = F.mse_loss((operator.corrupt(pred_original_sample, batch["operator_params"])[0]).float(), corrupted_values.float(), reduction="mean")
+                # with torch.no_grad():
+                #     test_loss = F.mse_loss(pred_original_sample.float(), batch["pixel_values"].float(), reduction="mean")
 
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
-                avg_test_loss = accelerator.gather(test_loss.repeat(args.train_batch_size)).mean()
-                avg_unobserved_loss = accelerator.gather(unobserved_loss.repeat(args.train_batch_size)).mean()
-                avg_loss_on_hat_pixels = accelerator.gather(loss_on_hat_pixels.repeat(args.train_batch_size)).mean()
+                # avg_test_loss = accelerator.gather(test_loss.repeat(args.train_batch_size)).mean()
                 train_loss += avg_loss.item() / args.gradient_accumulation_steps
-                test_loss += avg_test_loss.item() / args.gradient_accumulation_steps
-                unobserved_loss = avg_unobserved_loss.item()
-                loss_on_hat_pixels = avg_loss_on_hat_pixels.item()
+                # test_loss += avg_test_loss.item() / args.gradient_accumulation_steps
                     
                 # Backpropagate
                 accelerator.backward(loss)
@@ -863,11 +858,9 @@ def main():
                 global_step += 1
                 accelerator.log({"train_loss": train_loss}, step=global_step)
                 accelerator.log({"test_loss": test_loss}, step=global_step)
-                accelerator.log({"unobserved_loss": unobserved_loss}, step=global_step)
-                accelerator.log({"loss_on_hat_pixels": loss_on_hat_pixels}, step=global_step)
 
                 train_loss = 0.0
-                test_loss = 0.0
+                # test_loss = 0.0
 
                 if global_step % args.checkpointing_steps == 0:
                     if accelerator.is_main_process:
