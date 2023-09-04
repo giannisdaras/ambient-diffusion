@@ -167,6 +167,7 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
 
         self.variance_type = variance_type
 
+
     def scale_model_input(self, sample: torch.FloatTensor, timestep: Optional[int] = None) -> torch.FloatTensor:
         """
         Ensures interchangeability with schedulers that need to scale the denoising model input depending on the
@@ -337,7 +338,9 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
         """
         t = timestep
 
+
         prev_t = self.previous_timestep(t)
+
 
         if model_output.shape[1] == sample.shape[1] * 2 and self.variance_type in ["learned", "learned_range"]:
             model_output, predicted_variance = torch.split(model_output, sample.shape[1], dim=1)

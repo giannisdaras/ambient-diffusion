@@ -7,7 +7,6 @@ import numpy as np
 import torch
 from transformers import CLIPImageProcessor, T5EncoderModel, T5Tokenizer
 from diffusers.models.unet_2d_condition import UNet2DConditionModel
-from scheduling_ddpm import DDPMScheduler
 from diffusers.utils import (
     BACKENDS_MAPPING,
     is_accelerate_available,
@@ -22,6 +21,7 @@ from diffusers.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.deepfloyd_if import IFPipelineOutput
 from diffusers.pipelines.deepfloyd_if.safety_checker import IFSafetyChecker
 from diffusers.pipelines.deepfloyd_if.watermark import IFWatermarker
+from scheduling_ddpm import DDPMScheduler
 import PIL
 
 
@@ -223,6 +223,7 @@ class IFPipeline(DiffusionPipeline):
         requires_safety_checker: bool = True,
     ):
         super().__init__()
+
 
         if safety_checker is None and requires_safety_checker:
             logger.warning(
@@ -923,8 +924,8 @@ class IFPipeline(DiffusionPipeline):
                 alpha_prod_t = self.scheduler.alphas_cumprod[t]
                 beta_prod_t = 1 - alpha_prod_t
                 model_output, predicted_variance = torch.split(noise_pred, model_input.shape[1], dim=1)
-                # pred_original_sample = hat_operator_params * (model_input - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5) + (1 - hat_operator_params) * model_output
-                pred_original_sample = (model_input - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
+                pred_original_sample = hat_operator_params * (model_input - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5) + (1 - hat_operator_params) * model_output
+                # pred_original_sample = (model_input - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
 
 
                 pred_original_sample = self.scheduler._threshold_sample(pred_original_sample)
