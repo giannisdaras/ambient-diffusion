@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from transformers import CLIPImageProcessor, T5EncoderModel, T5Tokenizer
 from diffusers.models.unet_2d_condition import UNet2DConditionModel
+from diffusers.schedulers import DDPMScheduler
 from diffusers.utils import (
     BACKENDS_MAPPING,
     is_accelerate_available,
@@ -21,7 +22,7 @@ from diffusers.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.deepfloyd_if import IFPipelineOutput
 from diffusers.pipelines.deepfloyd_if.safety_checker import IFSafetyChecker
 from diffusers.pipelines.deepfloyd_if.watermark import IFWatermarker
-from scheduling_ddpm import DDPMScheduler
+from diffusers.schedulers import DDPMScheduler
 import PIL
 
 

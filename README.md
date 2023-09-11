@@ -1,5 +1,10 @@
 ## Ambient Diffusion: Learning Clean Distributions from Corrupted Data
 
+This repository hosts the official PyTorch implementation of the paper: [Ambient Diffusion: Learning Clean Distributions from Corrupted Data](https://arxiv.org/abs/2305.19256).
+
+
+Authored by: Giannis Daras, Kulin Shah, Yuval Dagan, Aravind Gollakota, Alexandros G. Dimakis, Adam Klivans
+
 <center>
 
 ![](docs/fig1.jpeg)

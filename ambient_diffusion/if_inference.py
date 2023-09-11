@@ -1,5 +1,7 @@
 from transformers import T5EncoderModel
 from pipeline_if import IFPipeline as DiffusionPipeline
+from scheduling_ddpm import step
+from diffusers.schedulers import DDPMScheduler
 import gc
 import torch
 from dnnlib.util import save_images, save_image
@@ -54,8 +56,7 @@ def main(upscale, checkpoint_path, output_dir, batch_size, num_images, batch_res
         unet=None, 
         device_map="auto"
     )
-    pipe.scheduler.variance_type = None
-    pipe.scheduler.config.variance_type = None
+
 
     prompts = batch_size * [""]
     prompt_embeds, negative_embeds = pipe.encode_prompt(prompts)
@@ -76,6 +77,10 @@ def main(upscale, checkpoint_path, output_dir, batch_size, num_images, batch_res
         loaded_dict = torch.load(checkpoint_path, map_location="cuda")
         fixed_dict = OrderedDict({key.replace("_orig_mod.module.", ""): value for key, value in loaded_dict.items()})
         pipe.unet.load_state_dict(fixed_dict)
+    
+    pipe.scheduler.variance_type = None
+    pipe.scheduler.config.variance_type = None
+    pipe.scheduler.step = step.__get__(pipe.scheduler, DDPMScheduler)
 
 
     for batch_index in tqdm(range(int(np.ceil(num_images / batch_size)))):
