@@ -180,6 +180,9 @@ def ambient_sampler(
 @click.option('--skip_generation', help='Skip image generation and only compute metrics', default=False, required=False, type=bool)
 @click.option('--skip_calculation', help='Skip metrics', default=False, required=False, type=bool)
 
+# if the network is class conditional, the number of classes it is trained on must be specified
+@click.option('--num_classes',             help='Number of classes', metavar='INT', type=int, default=0, show_default=True)
+
 @click.option('--steps', 'num_steps',      help='Number of sampling steps', metavar='INT',                          type=click.IntRange(min=1), default=18, show_default=True)
 @click.option('--sigma_min',               help='Lowest noise level  [default: varies]', metavar='FLOAT',           type=click.FloatRange(min=0))
 @click.option('--sigma_max',               help='Highest noise level  [default: varies]', metavar='FLOAT',          type=click.FloatRange(min=0))
@@ -202,7 +205,7 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
          num_masks, guidance_scale, mask_full_rgb,
          # other params
          experiment_name, wandb_id, ref_path, num_expected, seed, eval_step, skip_generation,
-         skip_calculation,
+         skip_calculation, num_classes,
          device=torch.device('cuda'),  **sampler_kwargs):
     torch.multiprocessing.set_start_method('spawn')
     dist.init()
@@ -234,8 +237,12 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
         with dnnlib.util.open_url(training_options_loc, verbose=(dist.get_rank() == 0)) as f:
             training_options = json.load(f)
 
-        # data_kwarg_obj = dnnlib.util.construct_class_by_name(**training_options['dataset_kwargs'])
-        interface_kwargs = dict(img_resolution=32, label_dim=10, img_channels=6)
+        if training_options['dataset_kwargs']['use_labels']:
+            assert num_classes > 0, "If the network is class conditional, the number of classes must be positive."
+            label_dim = num_classes
+        else:
+            label_dim = 0
+        interface_kwargs = dict(img_resolution=training_options['dataset_kwargs']['resolution'], label_dim=label_dim, img_channels=6)
         network_kwargs = training_options['network_kwargs']
         model_to_be_initialized = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs) # subclass of torch.nn.Module
 

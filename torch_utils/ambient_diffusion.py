@@ -1,6 +1,8 @@
 import torch
 import numpy as np
 
+def average_missing_pixels():
+    pass
 
 def get_random_mask(image_shape, survival_probability, mask_full_rgb=False, same_for_all_batch=False, device='cuda', seed=None):
     if seed is not None:
