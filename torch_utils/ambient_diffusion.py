@@ -1,5 +1,7 @@
 import torch
 import numpy as np
+import torch.nn as nn
+import torch.nn.functional as F
 
 def average_missing_pixels():
     pass
@@ -104,3 +106,96 @@ def get_hat_patch_mask(patch_mask, crop_size, hat_crop_size, same_for_all_batch=
     hat_patch_mask.view(-1)[patch_indices] = expanded_hat_mask
     hat_patch_mask = hat_patch_mask.reshape(patch_mask.shape)
     return hat_patch_mask
+
+
+class ForwardOperator():
+    """
+        Base class for forward operators.
+    """
+    def corrupt(self, x, *args, **kwargs):
+        raise NotImplementedError("Corrupt method not implemented for class {}".format(self.__class__.__name__))
+
+    def hat_corrupt(self, x, *args, **kwargs):
+        raise NotImplementedError("Hat corrupt method not implemented for class {}".format(self.__class__.__name__))
+    
+
+class MaskingForwardOperator(ForwardOperator):
+    def __init__(self, corruption_probability, delta_probability, mask_full_rgb=True):
+        self.corruption_probability = corruption_probability
+        self.delta_probability = delta_probability
+        self.mask_full_rgb = mask_full_rgb
+    
+    def corrupt(self, x, mask=None):
+        """
+            Args:
+                x: (batch_size, num_channels, height, width): *clean* input images
+                mask: (batch_size, num_channels, height, width): mask used to corrupt the input images. If None, it is generated randomly
+            Returns:
+                x_corrupted: (batch_size, num_channels, height, width): *corrupted* input images
+                mask: (batch_size, num_channels, height, width): mask used to corrupt the input images
+        """
+        if mask is None:
+            mask = get_random_mask(x.shape, 1 - self.corruption_probability, mask_full_rgb=self.mask_full_rgb, 
+                                same_for_all_batch=False, device=x.device, seed=None)
+        return x * mask, mask
+    
+    def hat_corrupt(self, x, mask=None, hat_mask=None):
+        """
+            Args:
+                x: (batch_size, num_channels, height, width): *corrupted* input images
+                mask: (batch_size, num_channels, height, width): mask used to corrupt the input images
+                hat_mask: (batch_size, num_channels, height, width): mask for hat corruption. If None, it is generated randomly.
+            Returns:
+                x_hat: (batch_size, num_channels, height, width): *hat-corrupted* input images
+                hat_mask: (batch_size, num_channels, height, width): mask used to hat-corrupt the input images
+        """
+        if mask is None:
+            _, mask = self.corrupt(x)
+
+        if hat_mask is None:
+            hat_mask = get_random_mask(x.shape, 1 - self.delta_probability, mask_full_rgb=self.mask_full_rgb, 
+                                        same_for_all_batch=False, device=x.device, seed=None)
+        hat_mask = mask * hat_mask
+        return x * hat_mask, hat_mask
+
+
+class AveragingForwardOperator(ForwardOperator):
+    def __init__(self, corruption_probability, downsampling_factor=8):
+        self.corruption_probability = corruption_probability
+        self.downsampling_factor = downsampling_factor
+    
+    def corrupt(self, x, mask=None):
+        """
+            Args:
+                
+                
+        """        
+        if mask is None:
+            # create a bernoulli mask to decide which images in the batch will get downsampled
+            mask = torch.bernoulli(torch.ones(x.shape[0], device=x.device) * self.corruption_probability)
+            mask = mask.view(-1, 1, 1, 1)
+        
+        # downsample all images
+        downsampled_images = F.avg_pool2d(x, self.downsampling_factor)
+        corrupted_images = F.interpolate(downsampled_images, size=(x.shape[2], x.shape[3]), mode='nearest')        
+        corrupted_images = mask * corrupted_images + (1 - mask) * x
+        return corrupted_images, mask
+    
+    def hat_corrupt(self, x, mask=None, *args):
+        if mask is None:
+            _, mask = self.corrupt(x)
+        # downsample all images that are not already downsampled
+        return self.corrupt(x, torch.ones_like(mask))[0], torch.ones_like(mask)
+
+
+def get_operator(corruption_pattern, corruption_probability=None, delta_probability=None, downsampling_factor=None):
+    if corruption_pattern == "dust":
+        assert corruption_probability is not None, "corruption_probability must be specified for dust corruption pattern"
+        assert delta_probability is not None, "delta_probability must be specified for dust corruption pattern"
+        return MaskingForwardOperator(corruption_probability, delta_probability)
+    elif corruption_pattern == "averaging":
+        assert corruption_probability is not None, "corruption_probability must be specified for averaging corruption pattern"
+        assert downsampling_factor is not None, "downsampling_factor must be specified for averaging corruption pattern"
+        return AveragingForwardOperator(corruption_probability, downsampling_factor)
+    else:
+        raise ValueError("Unknown corruption pattern {}".format(corruption_pattern))         

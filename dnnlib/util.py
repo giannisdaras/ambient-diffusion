@@ -533,10 +533,11 @@ def print_tensor_stats(tensor, tensor_name):
 
 
 def tensor_clipping(x, static=True, p=0.99):
+    dtype = x.dtype
     if static:
         return torch.clip(x, -1.0, 1.0)
     else:
-        s_val = torch.tensor(np.percentile(torch.abs(x).detach().cpu().numpy(), p, axis=tuple(range(1, x.ndim))), device=x.device)
+        s_val = torch.tensor(np.percentile(torch.abs(x).detach().cpu().numpy(), p, axis=tuple(range(1, x.ndim))), device=x.device, dtype=dtype)
         s_val = torch.max(s_val, torch.tensor(1.0))
         s_val = s_val.reshape((-1, 1, 1, 1))
         return torch.clip(x, -s_val, s_val) / s_val
