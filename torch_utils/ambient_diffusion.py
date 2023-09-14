@@ -2,6 +2,8 @@ import torch
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
+import scipy
+from .motionblur import Kernel
 
 def average_missing_pixels():
     pass
@@ -108,6 +110,53 @@ def get_hat_patch_mask(patch_mask, crop_size, hat_crop_size, same_for_all_batch=
     return hat_patch_mask
 
 
+class Blurkernel(nn.Module):
+    def __init__(self, blur_type='gaussian', kernel_size=31, std=3.0, device='cuda'):
+        super().__init__()
+        self.blur_type = blur_type
+        self.kernel_size = kernel_size
+        self.std = std
+        self.device = device
+        self.seq = nn.Sequential(
+            nn.ReflectionPad2d(self.kernel_size//2),
+            nn.Conv2d(3, 3, self.kernel_size, stride=1, padding=0, bias=False, groups=3)
+        )
+
+        self.weights_init()
+
+    def forward(self, x):
+        return self.seq(x)
+    
+    def corrupt(self, x, *args):
+        return self.forward(x), torch.ones_like(x)
+
+    def weights_init(self):
+        if self.blur_type == "gaussian":
+            n = np.zeros((self.kernel_size, self.kernel_size))
+            n[self.kernel_size // 2,self.kernel_size // 2] = 1
+            k = scipy.ndimage.gaussian_filter(n, sigma=self.std)
+            k = torch.from_numpy(k)
+            self.k = k
+            for name, f in self.named_parameters():
+                f.data.copy_(k)
+        elif self.blur_type == "motion":
+            k = Kernel(size=(self.kernel_size, self.kernel_size), intensity=self.std).kernelMatrix
+            k = torch.from_numpy(k)
+            self.k = k
+            for name, f in self.named_parameters():
+                f.data.copy_(k)
+
+    def update_weights(self, k):
+        if not torch.is_tensor(k):
+            k = torch.from_numpy(k).to(self.device)
+        for name, f in self.named_parameters():
+            f.data.copy_(k)
+
+    def get_kernel(self):
+        return self.k
+    
+
+
 class ForwardOperator():
     """
         Base class for forward operators.
@@ -187,12 +236,57 @@ class AveragingForwardOperator(ForwardOperator):
         # downsample all images that are not already downsampled
         return self.corrupt(x, torch.ones_like(mask))[0], torch.ones_like(mask)
 
+class CompressedSensingOperator(ForwardOperator):
+    def __init__(self, num_measurements):
+        assert num_measurements > 1, "Number of measurements must be greater than 1"
+        self.num_measurements = num_measurements
+    
+    def corrupt(self, x, measurement_matrix=None):
+        """
+            Args:
+                x: (batch_size, num_channels, height, width): *clean* input images
+                measurement_matrix: (num_measurements, num_channels * height * width): measurement matrix. If None, it is generated randomly
+            Returns:
+                x_hat: (batch_size, num_channels, height, width): *corrupted* images
+                measurement_matrix: (num_measurements, num_channels * height * width): measurement matrix
+        """
+        if measurement_matrix is None:
+            measurement_matrix = torch.randn(self.num_measurements, x.shape[1] * x.shape[2] * x.shape[3], device=x.device) / np.sqrt(self.num_measurements)
+        x_orig_shape = x.shape
+        x = x.view(x.shape[0], -1)
+        y = torch.matmul(measurement_matrix, x.transpose(0, 1)).transpose(0, 1)
 
-def get_operator(corruption_pattern, corruption_probability=None, delta_probability=None, downsampling_factor=None):
+        # create x_hat from pseudoinverse of measurement matrix
+        # measurement_matrix_pinv = torch.pinverse(measurement_matrix)
+        measurement_matrix_pinv = measurement_matrix.transpose(1, 0)
+        x_hat = torch.matmul(measurement_matrix_pinv, y.transpose(0, 1)).transpose(0, 1)
+
+        x_hat = x_hat.view(*x_orig_shape)
+        return x_hat, measurement_matrix
+
+    def hat_corrupt(self, x, measurement_matrix=None, *args):
+        
+        if measurement_matrix is None:
+            # x is not corrupted, so we need to first corrupt it
+            x, measurement_matrix = self.corrupt(x)
+        
+        # randomly select m-1 rows from the measurement matrix
+        measurement_matrix = measurement_matrix[torch.randperm(measurement_matrix.shape[0])[:self.num_measurements - 1]]
+        # add a random row to the measurement matrix
+        measurement_matrix = torch.cat([measurement_matrix, torch.randn(1, measurement_matrix.shape[1], device=x.device) / np.sqrt(self.num_measurements)], dim=0)
+        return self.corrupt(x, measurement_matrix)[0], measurement_matrix
+
+
+def get_operator(corruption_pattern, corruption_probability=None, delta_probability=None, downsampling_factor=None, blur_type=None, kernel_size=None, kernel_std=None, num_measurements=None):
     if corruption_pattern == "dust":
         assert corruption_probability is not None, "corruption_probability must be specified for dust corruption pattern"
         assert delta_probability is not None, "delta_probability must be specified for dust corruption pattern"
         return MaskingForwardOperator(corruption_probability, delta_probability)
+    elif corruption_pattern == "compressed_sensing":
+        assert num_measurements is not None, "num_measurements must be specified for compressed sensing corruption pattern"
+        return CompressedSensingOperator(num_measurements)
+    elif corruption_pattern == "blurring":
+        return Blurkernel(blur_type=blur_type, kernel_size=kernel_size, std=kernel_std).to("cuda")
     elif corruption_pattern == "averaging":
         assert corruption_probability is not None, "corruption_probability must be specified for averaging corruption pattern"
         assert downsampling_factor is not None, "downsampling_factor must be specified for averaging corruption pattern"

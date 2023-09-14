@@ -68,7 +68,10 @@ def ambient_sampler(
         masked_image = corruption_mask * x_hat
         noisy_image = masked_image
 
-        net_input = torch.cat([noisy_image, corruption_mask], dim=1)
+        if net.img_channels == 3:
+            net_input = noisy_image
+        else:
+            net_input = torch.cat([noisy_image, corruption_mask], dim=1)
         net_output = net(net_input, t_hat, class_labels).to(torch.float32)[:, :3]
         # print_tensor_stats(net_output, 'Denoised')
         if clipping:
@@ -89,8 +92,10 @@ def ambient_sampler(
             x_next.requires_grad = True
 
             masked_image = corruption_mask * x_next
-            noisy_image = masked_image
-            net_input = torch.cat([noisy_image, corruption_mask], dim=1)
+            if net.img_channels == 3:
+                net_input = masked_image
+            else:
+                net_input = torch.cat([masked_image, corruption_mask], dim=1)
             net_output = net(net_input, t_next, class_labels).to(torch.float32)[:, :3]
 
             if clipping:
@@ -140,8 +145,18 @@ def ambient_sampler(
 @click.option('--num_classes',             help='Number of classes', metavar='INT', type=int, default=0, show_default=True)
 
 # Forward Operator params
-@click.option('--corruption_pattern',     help='Corruption pattern', metavar='dust|averaging', type=click.Choice(['dust', 'averaging']), default='averaging', show_default=True)
+@click.option('--corruption_pattern',     help='Corruption pattern', metavar='dust|averaging|blurring|compressed_sensing', 
+    type=click.Choice(['dust', 'averaging', 'blurring', 'compressed_sensing']), default='averaging', show_default=True)
 @click.option('--downsampling_factor',    help='Downsampling factor', metavar='INT', type=int, default=8, show_default=True)
+
+@click.option('--num_measurements',      help='Number of measurements', metavar='INT', type=int, default=32, show_default=True)
+
+# blurring
+@click.option('--blur_type',    help='Blurring type', metavar='motion|gaussian', type=click.Choice(['motion', 'gaussian']), default='motion', show_default=True)
+@click.option('--kernel_size',   help='Kernel size', metavar='INT', type=int, default=31, show_default=True)
+@click.option('--kernel_std',   help='Kernel std', metavar='FLOAT', type=float, default=3, show_default=True)
+
+
 
 # Measurements
 @click.option('--measurements_path',      help='Path to the measurements', metavar='PATH', type=str, required=True)
@@ -169,7 +184,9 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
          mask_full_rgb,
          # other params
          experiment_name, wandb_id, ref_path, num_expected, seed, eval_step, skip_generation,
-         skip_calculation, num_classes, corruption_pattern, downsampling_factor, measurements_path,
+         skip_calculation, num_classes, corruption_pattern, downsampling_factor, num_measurements, 
+         blur_type, kernel_size, kernel_std, 
+         measurements_path,
          device=torch.device('cuda'),  **sampler_kwargs):
     torch.multiprocessing.set_start_method('spawn')
     dist.init()
@@ -180,7 +197,8 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
     num_batches = ((len(seeds) - 1) // (max_batch_size * dist.get_world_size()) + 1) * dist.get_world_size()
 
     # Loading operator
-    operator = get_operator(corruption_pattern, corruption_probability=1.0, delta_probability=1.0, downsampling_factor=downsampling_factor)
+    operator = get_operator(corruption_pattern, corruption_probability=1.0, delta_probability=1.0, downsampling_factor=downsampling_factor, 
+        blur_type=blur_type, kernel_size=kernel_size, kernel_std=kernel_std, num_measurements=num_measurements)
 
     # Loading dataset with reference images
     train_dataset = ImageFolderDataset(path=measurements_path,
@@ -216,6 +234,8 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
         else:
             label_dim = 0
         interface_kwargs = dict(img_resolution=training_options['dataset_kwargs']['resolution'], label_dim=label_dim, img_channels=6)
+        # interface_kwargs = dict(img_resolution=training_options['dataset_kwargs']['resolution'], label_dim=label_dim, img_channels=6)
+
         network_kwargs = training_options['network_kwargs']
         model_to_be_initialized = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs) # subclass of torch.nn.Module
 
@@ -294,6 +314,11 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
                     # load images from dataset
                     ref_images = next(train_dataloader)[0][:, :3].to(device)
                     corrupted_images, operator_params = operator.corrupt(ref_images)
+                    curr_seed = batch_seeds[0]
+                    os.makedirs(os.path.join(outdir, str(checkpoint_number)), exist_ok=True)
+                    save_images(corrupted_images, os.path.join(outdir, str(checkpoint_number), f'corrupted-{curr_seed:06d}.png'))
+                    save_images(ref_images, os.path.join(outdir, str(checkpoint_number), f'ref-{curr_seed:06d}.png'))
+
                     # Generate images.
                     sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}
 
@@ -304,14 +329,12 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
                         survival_probability=survival_probability, 
                         mask_full_rgb=mask_full_rgb, **sampler_kwargs)
 
-                    curr_seed = batch_seeds[0]
                     image_dir = os.path.join(outdir, str(checkpoint_number), 
                                             f'collage-{curr_seed-curr_seed%1000:06d}') if subdirs else os.path.join(outdir, str(checkpoint_number), "collages")
 
 
                     dist.print0(f"Saving loc: {image_dir}")
                     image_path = os.path.join(image_dir, f'collage-{curr_seed:06d}.png')
-                    save_images(corrupted_images, os.path.join(outdir, str(checkpoint_number), f'corrupted-{curr_seed:06d}.png'))
                     save_images(images, os.path.join(outdir, str(checkpoint_number), f'fixed-{curr_seed:06d}.png'))
 
                     # Save images.
