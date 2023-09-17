@@ -145,16 +145,24 @@ def ambient_sampler(
 @click.option('--num_classes',             help='Number of classes', metavar='INT', type=int, default=0, show_default=True)
 
 # Forward Operator params
-@click.option('--corruption_pattern',     help='Corruption pattern', metavar='dust|averaging|blurring|compressed_sensing', 
-    type=click.Choice(['dust', 'averaging', 'blurring', 'compressed_sensing']), default='averaging', show_default=True)
+@click.option('--corruption_pattern',     help='Corruption pattern', metavar='dust|box_masking|averaging|blurring|compressed_sensing', 
+    type=click.Choice(['box_masking', 'dust', 'averaging', 'blurring', 'compressed_sensing']), default='averaging', show_default=True)
+
+# masking
+@click.option('--operator_corruption_probability', help='Probability of corruption', metavar='FLOAT', type=float, default=0.4, show_default=True)
+
+# downsampling
 @click.option('--downsampling_factor',    help='Downsampling factor', metavar='INT', type=int, default=8, show_default=True)
 
+
+# compressed sensing
 @click.option('--num_measurements',      help='Number of measurements', metavar='INT', type=int, default=32, show_default=True)
 
 # blurring
 @click.option('--blur_type',    help='Blurring type', metavar='motion|gaussian', type=click.Choice(['motion', 'gaussian']), default='motion', show_default=True)
 @click.option('--kernel_size',   help='Kernel size', metavar='INT', type=int, default=31, show_default=True)
 @click.option('--kernel_std',   help='Kernel std', metavar='FLOAT', type=float, default=3, show_default=True)
+
 
 
 
@@ -184,7 +192,8 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
          mask_full_rgb,
          # other params
          experiment_name, wandb_id, ref_path, num_expected, seed, eval_step, skip_generation,
-         skip_calculation, num_classes, corruption_pattern, downsampling_factor, num_measurements, 
+         skip_calculation, num_classes, corruption_pattern, operator_corruption_probability, 
+         downsampling_factor, num_measurements, 
          blur_type, kernel_size, kernel_std, 
          measurements_path,
          device=torch.device('cuda'),  **sampler_kwargs):
@@ -197,15 +206,15 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
     num_batches = ((len(seeds) - 1) // (max_batch_size * dist.get_world_size()) + 1) * dist.get_world_size()
 
     # Loading operator
-    operator = get_operator(corruption_pattern, corruption_probability=1.0, delta_probability=1.0, downsampling_factor=downsampling_factor, 
+    operator = get_operator(corruption_pattern, corruption_probability=operator_corruption_probability, delta_probability=0.0, downsampling_factor=downsampling_factor, 
         blur_type=blur_type, kernel_size=kernel_size, kernel_std=kernel_std, num_measurements=num_measurements)
 
     # Loading dataset with reference images
     train_dataset = ImageFolderDataset(path=measurements_path,
                                 corruption_probability=0.0, delta_probability=0.0,
                                 corruption_pattern="dust", mask_full_rgb=True)
-    sampler = misc.InfiniteSampler(dataset=train_dataset, rank=dist.get_rank(), num_replicas=dist.get_world_size(), seed=42)
-    train_dataloader = iter(torch.utils.data.DataLoader(dataset=train_dataset, sampler=sampler, batch_size=max_batch_size))
+    sampler = misc.InfiniteSampler(dataset=train_dataset, rank=dist.get_rank(), num_replicas=dist.get_world_size(), seed=42, shuffle=False)
+    train_dataloader = iter(torch.utils.data.DataLoader(dataset=train_dataset, sampler=sampler, batch_size=max_batch_size, shuffle=False))
 
     dist.print0(f"The algorithm will run for {num_batches} batches --  {len(seeds)} images of batch size {max_batch_size}")
     all_batches = torch.as_tensor(seeds).tensor_split(num_batches)
@@ -234,7 +243,6 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
         else:
             label_dim = 0
         interface_kwargs = dict(img_resolution=training_options['dataset_kwargs']['resolution'], label_dim=label_dim, img_channels=6)
-        # interface_kwargs = dict(img_resolution=training_options['dataset_kwargs']['resolution'], label_dim=label_dim, img_channels=6)
 
         network_kwargs = training_options['network_kwargs']
         model_to_be_initialized = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs) # subclass of torch.nn.Module
@@ -316,7 +324,10 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
                     corrupted_images, operator_params = operator.corrupt(ref_images)
                     curr_seed = batch_seeds[0]
                     os.makedirs(os.path.join(outdir, str(checkpoint_number)), exist_ok=True)
-                    save_images(corrupted_images, os.path.join(outdir, str(checkpoint_number), f'corrupted-{curr_seed:06d}.png'))
+                    try:
+                        save_images(corrupted_images, os.path.join(outdir, str(checkpoint_number), f'corrupted-{curr_seed:06d}.png'))
+                    except:
+                        print("Failed to save corrupted images. Maybe they are measurements?")
                     save_images(ref_images, os.path.join(outdir, str(checkpoint_number), f'ref-{curr_seed:06d}.png'))
 
                     # Generate images.

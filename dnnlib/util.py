@@ -568,6 +568,22 @@ def save_images(images, image_path, num_rows=None, num_cols=None):
     grid_image.save(image_path)
 
 
+def unroll_collage(x, num_rows):
+    """Unroll a collage of images into a batch of images.
+        Args:
+        :x (torch.Tensor): shape (3, width, height)
+        :num_rows (int): number of rows in the collage
+        Returns: 
+        :x (torch.Tensor): shape (num_rows**2, 3, width, height)
+    """
+    x = x.squeeze()
+    img_resolution = x.shape[-1] // num_rows
+    x = x.reshape(3, num_rows, img_resolution, num_rows, img_resolution)
+    x = x.permute(0, 1, 3, 2, 4).reshape(3, num_rows**2, img_resolution, img_resolution)
+    x = x.permute(1, 0, 2, 3)
+    return x
+
+
 def average_image(x, scale_factor):
     down_scaled = F.interpolate(x, scale_factor=scale_factor, mode='area')
     averaged = F.interpolate(down_scaled, size=(x.shape[2], x.shape[3]), mode='bilinear', align_corners=False)

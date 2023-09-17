@@ -208,6 +208,45 @@ class MaskingForwardOperator(ForwardOperator):
         return x * hat_mask, hat_mask
 
 
+
+class BoxMaskingForwardOperator(ForwardOperator):
+    def __init__(self, corruption_probability, delta_probability):
+        self.corruption_probability = corruption_probability
+        self.delta_probability = delta_probability
+    
+    def corrupt(self, x, mask=None):
+        """
+            Args:
+                x: (batch_size, num_channels, height, width): *clean* input images
+                mask: (batch_size, num_channels, height, width): mask used to corrupt the input images. If None, it is generated randomly
+            Returns:
+                x_corrupted: (batch_size, num_channels, height, width): *corrupted* input images
+                mask: (batch_size, num_channels, height, width): mask used to corrupt the input images
+        """
+        if mask is None:
+            mask = get_box_mask(x.shape, 1 - self.corruption_probability,
+                                same_for_all_batch=False, device=x.device)
+        return x * mask, mask
+    
+    def hat_corrupt(self, x, mask=None, hat_mask=None):
+        """
+            Args:
+                x: (batch_size, num_channels, height, width): *corrupted* input images
+                mask: (batch_size, num_channels, height, width): mask used to corrupt the input images
+                hat_mask: (batch_size, num_channels, height, width): mask for hat corruption. If None, it is generated randomly.
+            Returns:
+                x_hat: (batch_size, num_channels, height, width): *hat-corrupted* input images
+                hat_mask: (batch_size, num_channels, height, width): mask used to hat-corrupt the input images
+        """
+        if mask is None:
+            _, mask = self.corrupt(x)
+
+        if hat_mask is None:
+            hat_mask = get_box_mask(x.shape, 1 - self.delta_probability,
+                                        same_for_all_batch=False, device=x.device)
+        hat_mask = mask * hat_mask
+        return x * hat_mask, hat_mask
+
 class AveragingForwardOperator(ForwardOperator):
     def __init__(self, corruption_probability, downsampling_factor=8):
         self.corruption_probability = corruption_probability
@@ -253,16 +292,17 @@ class CompressedSensingOperator(ForwardOperator):
         if measurement_matrix is None:
             measurement_matrix = torch.randn(self.num_measurements, x.shape[1] * x.shape[2] * x.shape[3], device=x.device) / np.sqrt(self.num_measurements)
         x_orig_shape = x.shape
-        x = x.view(x.shape[0], -1)
+        x = x.reshape(x.shape[0], -1)
         y = torch.matmul(measurement_matrix, x.transpose(0, 1)).transpose(0, 1)
 
-        # create x_hat from pseudoinverse of measurement matrix
-        # measurement_matrix_pinv = torch.pinverse(measurement_matrix)
-        measurement_matrix_pinv = measurement_matrix.transpose(1, 0)
-        x_hat = torch.matmul(measurement_matrix_pinv, y.transpose(0, 1)).transpose(0, 1)
+        return y, measurement_matrix
+        # # create x_hat from pseudoinverse of measurement matrix
+        # # measurement_matrix_pinv = torch.pinverse(measurement_matrix)
+        # measurement_matrix_pinv = measurement_matrix.transpose(1, 0)
+        # x_hat = torch.matmul(measurement_matrix_pinv, y.transpose(0, 1)).transpose(0, 1)
 
-        x_hat = x_hat.view(*x_orig_shape)
-        return x_hat, measurement_matrix
+        # x_hat = x_hat.reshape(*x_orig_shape)
+        # return x_hat, measurement_matrix
 
     def hat_corrupt(self, x, measurement_matrix=None, *args):
         
@@ -282,6 +322,10 @@ def get_operator(corruption_pattern, corruption_probability=None, delta_probabil
         assert corruption_probability is not None, "corruption_probability must be specified for dust corruption pattern"
         assert delta_probability is not None, "delta_probability must be specified for dust corruption pattern"
         return MaskingForwardOperator(corruption_probability, delta_probability)
+    elif corruption_pattern == "box_masking":
+        assert corruption_probability is not None, "corruption_probability must be specified for box masking corruption pattern"
+        assert delta_probability is not None, "delta_probability must be specified for box masking corruption pattern"
+        return BoxMaskingForwardOperator(corruption_probability, delta_probability)
     elif corruption_pattern == "compressed_sensing":
         assert num_measurements is not None, "num_measurements must be specified for compressed sensing corruption pattern"
         return CompressedSensingOperator(num_measurements)
