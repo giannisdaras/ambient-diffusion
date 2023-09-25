@@ -134,7 +134,7 @@ class MaskingForwardOperator(ForwardOperator):
         """
         if mask is None:
             mask = get_random_mask(x.shape, 1 - self.corruption_probability, mask_full_rgb=self.mask_full_rgb, 
-                                same_for_all_batch=False, device=x.device, seed=None)
+                                same_for_all_batch=False, device=x.device, seed=None).to(x.dtype)
         return x * mask, mask
     
     def hat_corrupt(self, x, mask=None, hat_mask=None):
@@ -152,9 +152,50 @@ class MaskingForwardOperator(ForwardOperator):
 
         if hat_mask is None:
             hat_mask = get_random_mask(x.shape, 1 - self.delta_probability, mask_full_rgb=self.mask_full_rgb, 
-                                        same_for_all_batch=False, device=x.device, seed=None)
+                                        same_for_all_batch=False, device=x.device, seed=None).to(x.dtype)
         hat_mask = mask * hat_mask
         return x * hat_mask, hat_mask
+
+
+class CompressedSensingOperator(ForwardOperator):
+    def __init__(self, num_measurements):
+        assert num_measurements > 1, "Number of measurements must be greater than 1"
+        self.num_measurements = num_measurements
+    
+    def corrupt(self, x, measurement_matrix=None):
+        """
+            Args:
+                x: (batch_size, num_channels, height, width): *clean* input images
+                measurement_matrix: (num_measurements, num_channels * height * width): measurement matrix. If None, it is generated randomly
+            Returns:
+                x_hat: (batch_size, num_channels, height, width): *corrupted* images
+                measurement_matrix: (num_measurements, num_channels * height * width): measurement matrix
+        """
+        if measurement_matrix is None:
+            measurement_matrix = torch.randn(self.num_measurements, x.shape[1] * x.shape[2] * x.shape[3], device=x.device) / np.sqrt(self.num_measurements)
+        x_orig_shape = x.shape
+        x = x.reshape(x.shape[0], -1)
+        y = torch.matmul(measurement_matrix, x.transpose(0, 1)).transpose(0, 1)
+
+        # create x_hat from pseudoinverse of measurement matrix
+        # measurement_matrix_pinv = torch.pinverse(measurement_matrix)
+        measurement_matrix_pinv = measurement_matrix.transpose(1, 0)
+        x_hat = torch.matmul(measurement_matrix_pinv, y.transpose(0, 1)).transpose(0, 1)
+
+        x_hat = x_hat.reshape(*x_orig_shape)
+        return x_hat, measurement_matrix
+
+    def hat_corrupt(self, x, measurement_matrix=None, *args):
+        
+        if measurement_matrix is None:
+            # x is not corrupted, so we need to first corrupt it
+            x, measurement_matrix = self.corrupt(x)
+        
+        # randomly select m-1 rows from the measurement matrix
+        measurement_matrix = measurement_matrix[torch.randperm(measurement_matrix.shape[0])[:self.num_measurements - 1]]
+        # add a random row to the measurement matrix
+        measurement_matrix = torch.cat([measurement_matrix, torch.randn(1, measurement_matrix.shape[1], device=x.device) / np.sqrt(self.num_measurements)], dim=0)
+        return self.corrupt(x, measurement_matrix)[0], measurement_matrix
 
 
 class AveragingForwardOperator(ForwardOperator):
@@ -170,7 +211,7 @@ class AveragingForwardOperator(ForwardOperator):
         """        
         if mask is None:
             # create a bernoulli mask to decide which images in the batch will get downsampled
-            mask = torch.bernoulli(torch.ones(x.shape[0], device=x.device) * self.corruption_probability)
+            mask = torch.bernoulli(torch.ones(x.shape[0], device=x.device, dtype=x.dtype) * self.corruption_probability)
             mask = mask.view(-1, 1, 1, 1)
         
         # downsample all images
@@ -186,11 +227,14 @@ class AveragingForwardOperator(ForwardOperator):
         return self.corrupt(x, torch.ones_like(mask))[0], torch.ones_like(mask)
 
 
-def get_operator(corruption_pattern, corruption_probability=None, delta_probability=None, downsampling_factor=None):
+def get_operator(corruption_pattern, corruption_probability=None, delta_probability=None, downsampling_factor=None, num_measurements=None):
     if corruption_pattern == "dust":
         assert corruption_probability is not None, "corruption_probability must be specified for dust corruption pattern"
         assert delta_probability is not None, "delta_probability must be specified for dust corruption pattern"
         return MaskingForwardOperator(corruption_probability, delta_probability)
+    elif corruption_pattern == "compressed_sensing":
+        assert num_measurements is not None, "num_measurements must be specified for compressed sensing corruption pattern"
+        return CompressedSensingOperator(num_measurements)
     elif corruption_pattern == "averaging":
         assert corruption_probability is not None, "corruption_probability must be specified for averaging corruption pattern"
         assert downsampling_factor is not None, "downsampling_factor must be specified for averaging corruption pattern"
@@ -198,36 +242,6 @@ def get_operator(corruption_pattern, corruption_probability=None, delta_probabil
     else:
         raise ValueError("Unknown corruption pattern {}".format(corruption_pattern))         
 
-
-# class AveragingForwardOperator(ForwardOperator):
-#     def corrupt(self, x, mask):
-#         return x * mask
-    
-#     def hat_corrupt(self, x, mask):
-#         return x / mask
-
-
-# class Blur(nn.Module):
-#     def __init__(self, sigmas, half_size, num_channels=3):
-#         super().__init__()
-#         self.sigmas = sigmas
-#         self.half_size = half_size
-#         self.num_channels = num_channels
-
-#     def forward(self, image, t):
-#         sigma_weight = t - torch.arange(len(self.sigmas))
-#         sigma = self.sigmas[sigma_weight.argmin()]
-
-#         x = torch.arange(-self.half_size, self.half_size + 1).float()
-#         kernel_1d = torch.exp(-(x**2) / (2*sigma**2))
-#         kernel_1d = kernel_1d / torch.sum(kernel_1d)
-        
-#         kernel = torch.zeros((self.num_channels, 1, 2*self.half_size+1, 2*self.half_size+1))
-#         for i in range(self.num_channels):
-#             kernel[i, 0] = torch.outer(kernel_1d, kernel_1d)
-                
-#         out = F.conv2d(image, kernel.to(image.device), padding=self.half_size, groups=self.num_channels)
-#         return out
 
 
 
