@@ -364,13 +364,16 @@ def parse_args():
         ),
     )
 
-    parser.add_argument('--corruption_pattern', type=str, help='Corruption pattern', default='dust', choices=['dust', 'fixed_box', 'averaging'])
+    parser.add_argument('--corruption_pattern', type=str, help='Corruption pattern', default='dust', choices=['dust', 'fixed_box', 'averaging', 'compressed_sensing'])
     
     # parameters for forward operators
     parser.add_argument("--corruption_probability", type=float, default=0.4, help="Probability of a missing pixel.")
     parser.add_argument("--delta_probability", type=float, default=0.1, help="Probability of corrupting an existing pixel.")
+    # downsampling
     parser.add_argument("--downsampling_factor", type=int, default=8, help="Downsampling factor for corrupted images using the averaging operator.")
-    
+    # compressed sensing
+    parser.add_argument("--num_measurements", type=int, default=1024, help="Number of Gaussian measurements for compressed sensing.")
+
 
 
     args = parser.parse_args()
@@ -532,7 +535,7 @@ def main():
 
     operator = get_operator(corruption_pattern=args.corruption_pattern, 
                         corruption_probability=args.corruption_probability, delta_probability=args.delta_probability,
-                        downsampling_factor=args.downsampling_factor)
+                        downsampling_factor=args.downsampling_factor, num_measurements=args.num_measurements)
 
 
     # Get the datasets: you can either provide your own training and evaluation files (see below)
@@ -642,18 +645,21 @@ def main():
     else:
         train_dataset = ImageFolderDataset(path=args.train_data_dir, max_size=args.max_train_samples, random_seed=args.seed, 
                                     corruption_probability=args.corruption_probability, delta_probability=args.delta_probability,
-                                    corruption_pattern=args.corruption_pattern, mask_full_rgb=True)
+                                    corruption_pattern=args.corruption_pattern, num_measurements=args.num_measurements, downsampling_factor=args.downsampling_factor,
+                                    mask_full_rgb=True)
         def collate_fn(examples):
             pixel_values = torch.stack([torch.tensor(example[0]) for example in examples])
             pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-            operator_params = torch.stack([torch.tensor(example[2]) for example in examples])
-            operator_params = operator_params.to(memory_format=torch.contiguous_format).float()
 
-            operator_hat_params = torch.stack([torch.tensor(example[3]) for example in examples])
-            operator_hat_params = operator_hat_params.to(memory_format=torch.contiguous_format).float()
+            # operator_params = torch.stack([torch.tensor(example[2]) for example in examples])
+            # operator_params = operator_params.to(memory_format=torch.contiguous_format).float()
 
-            corrupted_values, _ = operator.corrupt(pixel_values, operator_params)
+            # operator_hat_params = torch.stack([torch.tensor(example[3]) for example in examples])
+            # operator_hat_params = operator_hat_params.to(memory_format=torch.contiguous_format).float()
+
+            corrupted_values, operator_params = operator.corrupt(pixel_values)
+            _, operator_hat_params = operator.hat_corrupt(corrupted_values, operator_params)
 
             return {"corrupted_values": corrupted_values, 
                     "operator_params": operator_params, 
@@ -762,31 +768,8 @@ def main():
 
             with accelerator.accumulate(unet):
                 corrupted_values = batch["corrupted_values"]
-                hat_corrupted_values = operator.hat_corrupt(corrupted_values, batch["operator_params"])[0]
-
-                # Sample noise that we'll add to the latents
-                noise = torch.randn_like(corrupted_values)
-                if args.noise_offset:
-                    # https://www.crosslabs.org//blog/diffusion-with-offset-noise
-                    noise += args.noise_offset * torch.randn(
-                        (corrupted_values.shape[0], corrupted_values.shape[1], 1, 1), device=corrupted_values.device
-                    )
-
                 bsz = corrupted_values.shape[0]
-                # Sample a random timestep for each image
-                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=corrupted_values.device)
-                timesteps = timesteps.long()
-                
-                # add noise
-                noisy_corrupted_values = noise_scheduler.add_noise(corrupted_values, operator.corrupt(noise, batch["operator_params"])[0], timesteps)
-                # corrupt further
-                noisy_hat_corrupted_values, operator_hat_params = operator.hat_corrupt(noisy_corrupted_values, batch["operator_params"])
-
-                if not args.empty_text:
-                    # Get the text embedding for conditioning
-                    encoder_hidden_states = text_encoder(batch["input_ids"])[0]
-                else:
-                    encoder_hidden_states = empty_embeds.repeat([noisy_hat_corrupted_values.shape[0], 1, 1])
+                hat_corrupted_values = operator.hat_corrupt(corrupted_values, batch["operator_params"])[0]
 
                 if step == 0:
                     try:
@@ -799,6 +782,31 @@ def main():
                                     os.path.join(save_dir, f"dataset_hat_corrupted.png"), num_rows=num_rows, num_cols=num_rows)
                     except:
                         print("Can't save images. Is batch size a square number?")
+
+
+                # Sample noise that we'll add to the latents
+                noise = torch.randn_like(corrupted_values)
+                if args.noise_offset:
+                    # https://www.crosslabs.org//blog/diffusion-with-offset-noise
+                    noise += args.noise_offset * torch.randn(
+                        (corrupted_values.shape[0], corrupted_values.shape[1], 1, 1), device=corrupted_values.device
+                    )
+
+                # Sample a random timestep for each image
+                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=corrupted_values.device)
+                timesteps = timesteps.long()
+                
+                # add noise
+                noisy_corrupted_values = noise_scheduler.add_noise(corrupted_values, operator.corrupt(noise, batch["operator_params"])[0], timesteps)
+                # corrupt further
+                noisy_hat_corrupted_values, operator_hat_params = operator.hat_corrupt(noisy_corrupted_values, batch["operator_params"])
+
+
+                if not args.empty_text:
+                    # Get the text embedding for conditioning
+                    encoder_hidden_states = text_encoder(batch["input_ids"])[0]
+                else:
+                    encoder_hidden_states = empty_embeds.repeat([noisy_hat_corrupted_values.shape[0], 1, 1])
 
                 # Get the target for loss depending on the prediction type
                 if noise_scheduler.config.prediction_type == "epsilon":
@@ -817,8 +825,8 @@ def main():
                 noise_pred, predicted_variance = torch.split(noise_pred_all, noisy_hat_corrupted_values.shape[1], dim=1)
 
                 # TODO(giannisdaras): not clear how to generalize this
-                pred_original_sample = operator_hat_params * (noisy_hat_corrupted_values - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5) + (1 - operator_hat_params) * noise_pred
-                # pred_original_sample = (noisy_hat_corrupted_values - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
+                # pred_original_sample = operator_hat_params * (noisy_hat_corrupted_values - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5) + (1 - operator_hat_params) * noise_pred
+                pred_original_sample = (noisy_hat_corrupted_values - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
 
                 if step == 0:
                     exp_name = args.output_dir.split("/")[-1]
