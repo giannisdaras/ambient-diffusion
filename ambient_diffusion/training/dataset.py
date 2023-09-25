@@ -40,10 +40,11 @@ class Dataset(torch.utils.data.Dataset):
         mask_full_rgb = False,
         corruption_pattern = "dust",
         downsampling_factor = 8, # Downsampling factor for averaging forward operator.
+        num_measurements = 1024, # Number of measurements for compressed sensing forward operator.
         normalize=True,
     ):
-        assert corruption_pattern in ["dust", "box", "fixed_box", "keep_patch", "averaging"], \
-            "corruption_pattern must be either 'dust', 'box', 'keep_patch', 'averaging' or 'fixed_box'"
+        assert corruption_pattern in ["dust", "box", "fixed_box", "keep_patch", "averaging", "compressed_sensing"], \
+            "corruption_pattern must be either 'dust', 'box', 'keep_patch', 'averaging', 'compressed_sensing' or 'fixed_box'"
         self._name = name
         self._raw_shape = list(raw_shape)
         self._use_labels = use_labels
@@ -56,6 +57,7 @@ class Dataset(torch.utils.data.Dataset):
         self.mask_full_rgb = mask_full_rgb
         self.corruption_pattern = corruption_pattern
         self.downsampling_factor = downsampling_factor
+        self.num_measurements = num_measurements
         self.normalize = normalize
 
         # Apply max_size.
@@ -127,7 +129,7 @@ class Dataset(torch.utils.data.Dataset):
 
         operator = get_operator(corruption_pattern=self.corruption_pattern, 
                             corruption_probability=self.corruption_probability, delta_probability=self.delta_probability, 
-                            downsampling_factor=self.downsampling_factor)
+                            downsampling_factor=self.downsampling_factor, num_measurements=self.num_measurements)
         corrupted_image, operator_params = operator.corrupt(torch.tensor(image[np.newaxis]))
         _, hat_operator_params = operator.hat_corrupt(corrupted_image, operator_params)
         return image.copy(), self.get_label(idx), operator_params.numpy()[0], hat_operator_params.numpy()[0]
