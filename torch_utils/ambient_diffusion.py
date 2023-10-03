@@ -156,8 +156,7 @@ class Blurkernel(nn.Module):
         return self.k
     
 
-
-class ForwardOperator():
+class ForwardOperator(nn.Module):
     """
         Base class for forward operators.
     """
@@ -166,7 +165,6 @@ class ForwardOperator():
 
     def hat_corrupt(self, x, *args, **kwargs):
         raise NotImplementedError("Hat corrupt method not implemented for class {}".format(self.__class__.__name__))
-    
 
 class MaskingForwardOperator(ForwardOperator):
     def __init__(self, corruption_probability, delta_probability, mask_full_rgb=True):
@@ -185,7 +183,7 @@ class MaskingForwardOperator(ForwardOperator):
         """
         if mask is None:
             mask = get_random_mask(x.shape, 1 - self.corruption_probability, mask_full_rgb=self.mask_full_rgb, 
-                                same_for_all_batch=False, device=x.device, seed=None)
+                                same_for_all_batch=False, device=x.device, seed=None).to(x.dtype)
         return x * mask, mask
     
     def hat_corrupt(self, x, mask=None, hat_mask=None):
@@ -203,7 +201,7 @@ class MaskingForwardOperator(ForwardOperator):
 
         if hat_mask is None:
             hat_mask = get_random_mask(x.shape, 1 - self.delta_probability, mask_full_rgb=self.mask_full_rgb, 
-                                        same_for_all_batch=False, device=x.device, seed=None)
+                                        same_for_all_batch=False, device=x.device, seed=None).to(x.dtype)
         hat_mask = mask * hat_mask
         return x * hat_mask, hat_mask
 

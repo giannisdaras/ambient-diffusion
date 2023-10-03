@@ -77,7 +77,11 @@ def open_image_folder(source_dir, *, max_images: Optional[int]):
 
     def iterate_images():
         for idx, fname in enumerate(input_images):
-            img = np.array(PIL.Image.open(fname))
+            try:
+                img = np.array(PIL.Image.open(fname))
+            except:
+                print("File {} might be a corrupted image file".format(fname))
+                continue
             yield dict(img=img, label=labels.get(arch_fnames.get(fname)))
             if idx >= max_idx - 1:
                 break
