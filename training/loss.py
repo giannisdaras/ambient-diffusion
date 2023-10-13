@@ -81,6 +81,37 @@ class EDMLoss:
         return loss
 
 
+@persistence.persistent_class
+class NoisyEDMLoss:
+    def __init__(self, P_mean=-1.2, P_std=1.2, sigma_data=0.5, epsilon=1e-3):
+        self.P_mean = P_mean
+        self.P_std = P_std
+        self.sigma_data = sigma_data
+        self.epsilon = epsilon
+
+    def __call__(self, net, images, labels=None, augment_pipe=None, **kwargs):
+        rnd_normal = torch.randn([images.shape[0], 1, 1, 1], device=images.device)
+        sigma = (rnd_normal * self.P_std + self.P_mean).exp()
+        weight = (sigma ** 2 + self.sigma_data ** 2) / (sigma * self.sigma_data) ** 2
+        y, augment_labels = augment_pipe(images) if augment_pipe is not None else (images, None)
+        n = torch.randn_like(y) * sigma
+        noisy_image = y + n
+        
+        cat_input = torch.cat([noisy_image, torch.ones_like(noisy_image)], axis=1)
+        D_yn = net(cat_input, sigma, labels, augment_labels=augment_labels)[:, :3]
+
+        epsilon = self.epsilon
+        perturbation_noise = torch.randn_like(noisy_image)
+        
+        perturbed_image = noisy_image + epsilon * perturbation_noise
+        cat_input = torch.cat([perturbed_image, torch.ones_like(perturbed_image)], axis=1)
+        D_yn_perturbed = net(cat_input, sigma, labels, augment_labels=augment_labels)[:, :3]
+
+        div_loss = (((D_yn_perturbed - D_yn) / epsilon).reshape(D_yn.shape[0], -1) * perturbation_noise.reshape(D_yn.shape[0], -1)).sum(axis=1)
+        identity_loss = ((D_yn - noisy_image) ** 2).reshape(D_yn.shape[0], -1).sum(axis=1)
+        loss = 2 * weight.squeeze() * div_loss + identity_loss
+        return loss, loss, loss
+
 #----------------------------------------------------------------------------
 # EDMLoss for Ambient Diffusion
 

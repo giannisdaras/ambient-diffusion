@@ -410,7 +410,7 @@ def list_dir(directory):
 
 def is_dir(directory):
     if not directory.startswith('s3://'):
-        return os.isdir(directory)
+        return os.path.isdir(directory)
     else:
         s3 = s3fs.S3FileSystem(anon=False)
         return s3.isdir(directory)       
@@ -542,22 +542,28 @@ def tensor_clipping(x, static=True, p=0.99):
         s_val = s_val.reshape((-1, 1, 1, 1))
         return torch.clip(x, -s_val, s_val) / s_val
 
-def save_image(images, image_path):
-    image_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(1, 2, 0).cpu().numpy()
+def save_image(images, image_path, is_numpy=False):
+    if not is_numpy:
+            image_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+    else:
+        image_np = images
     if image_np.shape[2] == 1:
         PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
     else:
         PIL.Image.fromarray(image_np, 'RGB').save(image_path)
 
 
-def save_images(images, image_path, num_rows=None, num_cols=None):
+def save_images(images, image_path, num_rows=None, num_cols=None, is_numpy=False):
     if num_rows is None:
         num_rows = int(np.sqrt(images.shape[0]))
     if num_cols is None:
         num_cols = int(np.ceil(images.shape[0] / num_rows))
     
     # TODO(giannisdaras): only works with square grids
-    image_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+    if not is_numpy:
+            image_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+    else:
+        image_np = images
     image_size = images.shape[-2]
     grid_image = PIL.Image.new('RGB', (num_cols * image_size, num_rows * image_size))
     for i in range(num_rows):

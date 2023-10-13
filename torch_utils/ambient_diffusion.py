@@ -156,7 +156,7 @@ class Blurkernel(nn.Module):
         return self.k
     
 
-class ForwardOperator(nn.Module):
+class ForwardOperator():
     """
         Base class for forward operators.
     """
