@@ -44,7 +44,7 @@ def parse_int_list(s):
 @click.option('--data',          help='Path to the dataset', metavar='ZIP|DIR',                     type=str, required=True)
 @click.option('--cond',          help='Train class-conditional model', metavar='BOOL',              type=bool, default=False, show_default=True)
 @click.option('--arch',          help='Network architecture', metavar='ddpmpp|ncsnpp|adm',          type=click.Choice(['ddpmpp', 'ncsnpp', 'adm']), default='ddpmpp', show_default=True)
-@click.option('--precond',       help='Preconditioning & loss function', metavar='vp|ve|edm|ambient',       type=click.Choice(['vp', 've', 'edm', 'ambient', 'noisy_edm']), default='ambient', show_default=True)
+@click.option('--precond',       help='Preconditioning & loss function', metavar='vp|ve|edm|ambient',       type=click.Choice(['vp', 've', 'edm', 'ambient', 'noisy_ambient', 'noisy_edm']), default='ambient', show_default=True)
 
 # Hyperparameters.
 @click.option('--duration',      help='Training duration', metavar='MIMG',                          type=click.FloatRange(min=0), default=200, show_default=True)
@@ -66,13 +66,22 @@ def parse_int_list(s):
 @click.option('--S_noise',  help='S_noise', metavar='S_noise', type=click.FloatRange(min=0, max=float('inf')), default=1.007, show_default=True)
 
 
-# Ambient diffusion
-@click.option('--corruption_probability', help='Probability of corrupting a single pixel from the dataset', metavar='FLOAT', default=0.4, show_default=True)
-@click.option('--delta_probability', help='Probability of corrupting a pixel that survived', metavar='FLOAT', default=0.1, show_default=True)
-@click.option('--mask_full_rgb', help='Whether to mask all the RGB channels together', metavar='BOOL', default=False, show_default=True)
+
 @click.option('--norm', help='Norm for loss', default=2, show_default=True)
 @click.option('--gated', help='Whether to use gated convolutions', metavar='BOOL', default=True, show_default=True)
-@click.option('--corruption_pattern', help='Corruption pattern', metavar='dust|box|downscale|fixed_box', default='dust', show_default=True, required=False)
+
+# Ambient diffusion
+@click.option('--corruption_pattern', help='Corruption pattern', metavar='dust|box|downscale|fixed_box|noise', default='dust', show_default=True, required=False)
+
+# inpainting
+@click.option('--mask_full_rgb', help='Whether to mask all the RGB channels together', metavar='BOOL', default=False, show_default=True)
+@click.option('--corruption_probability', help='Probability of corrupting a single pixel from the dataset', metavar='FLOAT', default=0.4, show_default=True)
+@click.option('--delta_probability', help='Probability of corrupting a pixel that survived', metavar='FLOAT', default=0.1, show_default=True)
+
+# noise
+@click.option('--sigma_nature', help='How much noise to add in the data', metavar='FLOAT', default=0.0, show_default=True)
+
+
 @click.option('--max_size', help='Limit training samples.', type=int, default=None, show_default=True)
 
 @click.option('--xflip',         help='Enable dataset x-flips', metavar='BOOL',                     type=bool, default=False, show_default=True)
@@ -120,7 +129,7 @@ def main(**kwargs):
     c.update(max_grad_norm=opts.max_grad_norm)
     c.dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=opts.data, use_labels=opts.cond, xflip=opts.xflip, cache=opts.cache, 
                                        corruption_probability=opts.corruption_probability, delta_probability=opts.delta_probability, mask_full_rgb=opts.mask_full_rgb,
-                                       corruption_pattern=opts.corruption_pattern)
+                                       corruption_pattern=opts.corruption_pattern, sigma_nature=opts.sigma_nature)
     c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=opts.workers, prefetch_factor=2)
     c.network_kwargs = dnnlib.EasyDict()
     c.loss_kwargs = dnnlib.EasyDict()
@@ -169,6 +178,10 @@ def main(**kwargs):
     elif opts.precond == 'noisy_edm':
         c.network_kwargs.class_name = 'training.networks.EDMPrecond'
         c.loss_kwargs.class_name = 'training.loss.NoisyEDMLoss'
+    elif opts.precond == 'noisy_ambient':
+        c.network_kwargs.class_name = 'training.networks.EDMPrecond'
+        c.loss_kwargs.class_name = 'training.loss.NoisyAmbientLoss'
+        c.loss_kwargs.sigma_nature = opts.sigma_nature
     elif opts.precond == 'ambient':
         c.network_kwargs.class_name = 'training.networks.EDMPrecond'
         c.loss_kwargs.class_name = 'training.loss.AmbientLoss'

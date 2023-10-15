@@ -40,9 +40,10 @@ class Dataset(torch.utils.data.Dataset):
         corruption_pattern = "dust",
         ratios = [1.0, 0.8, 0.6, 0.4, 0.2, 0.1],  # potential downsampling ratios,
         normalize=True,
+        sigma_nature=0.0,
     ):
-        assert corruption_pattern in ["dust", "box", "fixed_box", "keep_patch"], \
-            "corruption_pattern must be either 'dust', 'box', 'keep_patch', or 'fixed_box'"
+        assert corruption_pattern in ["dust", "box", "fixed_box", "keep_patch", "noise"], \
+            "corruption_pattern must be either 'dust', 'box', 'keep_patch', 'noise', or 'fixed_box'"
         self._name = name
         self._raw_shape = list(raw_shape)
         self._use_labels = use_labels
@@ -52,6 +53,7 @@ class Dataset(torch.utils.data.Dataset):
         self._label_shape = None
         self.corruption_probability = corruption_probability
         self.delta_probability = delta_probability
+        self.sigma_nature = sigma_nature
         self.mask_full_rgb = mask_full_rgb
         self.corruption_pattern = corruption_pattern
         self.ratios = ratios
@@ -150,6 +152,13 @@ class Dataset(torch.utils.data.Dataset):
             hat_patch_size =  int((1 - self.delta_probability) * patch_size)
             hat_corruption_mask = get_hat_patch_mask(corruption_mask, patch_size, hat_patch_size, same_for_all_batch=False, device='cpu')[0]
             corruption_mask = corruption_mask[0]
+        elif self.corruption_pattern == "noise":
+            # add noise to image with sigma = self.sigma_nature
+            noise = np.random.normal(0, self.sigma_nature, image.shape)
+            image = image + noise
+            # masks should be all ones
+            corruption_mask = np.ones(image.shape)
+            hat_corruption_mask = np.ones(image.shape)
         else:
             raise NotImplementedError("Corruption pattern not implemented")
             

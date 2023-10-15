@@ -112,6 +112,47 @@ class NoisyEDMLoss:
         loss = 2 * weight.squeeze() * div_loss + identity_loss
         return loss, loss, loss
 
+
+
+@persistence.persistent_class
+class NoisyAmbientLoss:
+    def __init__(self, P_mean=-1.2, P_std=1.2, sigma_data=0.5, sigma_nature=0.3):
+        self.P_mean = P_mean
+        self.P_std = P_std
+        self.sigma_data = sigma_data
+        self.sigma_nature = sigma_nature
+
+    def __call__(self, net, images, labels=None, augment_pipe=None, **kwargs):
+        rnd_normal = torch.randn([images.shape[0], 1, 1, 1], device=images.device)
+        desired_sigma = (rnd_normal * self.P_std + self.P_mean).exp()
+
+        extra_sigma = torch.sqrt(torch.max(desired_sigma**2 - self.sigma_nature**2, torch.zeros_like(desired_sigma)))
+
+
+        weight = (desired_sigma ** 2 + self.sigma_data ** 2) / (desired_sigma * self.sigma_data) ** 2
+        y, augment_labels = augment_pipe(images) if augment_pipe is not None else (images, None)
+        n = torch.randn_like(y) * extra_sigma
+        noisy_image = y + n
+        
+        cat_input = torch.cat([noisy_image, torch.ones_like(noisy_image)], axis=1)
+        D_yn = net(cat_input, desired_sigma, labels, augment_labels=augment_labels)[:, :3]
+
+        # I want the output of the model to be E[x0 | xt].
+        # It holds that E[x_nature | x_t]  = (sigma_t^2 - \sigma_nature^2) / sigma_t^2 * E[x0 | xt] + \sigma_nature^2 / sigma_t^2 * x_t
+        predicted_target = (desired_sigma**2 - self.sigma_nature**2) / desired_sigma**2 * D_yn + self.sigma_nature**2 / desired_sigma**2 * noisy_image
+
+        # for sigma_t < sigma_nature, the predicted target should be noisy image
+        predicted_target = torch.where(desired_sigma < self.sigma_nature, noisy_image, predicted_target)
+
+        # train to predict y
+        loss = weight * ((predicted_target - y) ** 2)
+        return loss, loss, loss
+
+
+
+
+
+
 #----------------------------------------------------------------------------
 # EDMLoss for Ambient Diffusion
 
