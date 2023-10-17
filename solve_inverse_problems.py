@@ -22,7 +22,7 @@ from collections import OrderedDict
 import warnings
 from training.dataset import ImageFolderDataset
 from torch_utils import misc
-
+import sys
 
 
 
@@ -35,7 +35,9 @@ def ambient_sampler(
     same_for_all_batch=False,
     clipping=True,
     static=True,  # whether to use soft clipping or static clipping
+    dps_scale=5.0,
 ):
+    dist.print0("Working with DPS scale: ", dps_scale)
     # Adjust noise levels based on what's supported by the network.
     sigma_min = max(sigma_min, net.sigma_min)
     sigma_max = min(sigma_max, net.sigma_max)
@@ -80,7 +82,6 @@ def ambient_sampler(
         corrupted_net_output = operator.corrupt(net_output, operator_params)[0]
         # compute mse between corrupted_net_output and corrupted_images        
         dps_grad_1 = -torch.autograd.grad(outputs=torch.linalg.norm(corrupted_net_output - corrupted_images), inputs=x_hat)[0]
-        dps_scale = 5.0
 
         denoising_grad_1 = (t_next - t_hat) * (x_hat - net_output) / t_hat
 
@@ -183,8 +184,7 @@ def ambient_sampler(
 @click.option('--disc', 'discretization',  help='Ablate time step discretization {t_i}', metavar='vp|ve|iddpm|edm', type=click.Choice(['vp', 've', 'iddpm', 'edm']))
 @click.option('--schedule',                help='Ablate noise schedule sigma(t)', metavar='vp|ve|linear',           type=click.Choice(['vp', 've', 'linear']))
 @click.option('--scaling',                 help='Ablate signal scaling s(t)', metavar='vp|none',                    type=click.Choice(['vp', 'none']))
-
-
+@click.option('--dps_scale', help='Scale of the DPS term', metavar='FLOAT', type=float, default=5.0, show_default=True)
 
 def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, class_idx, max_batch_size, 
          # Ambient Diffusion Params
@@ -263,10 +263,9 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
             checkpoint_numbers = np.array(checkpoint_numbers)
 
             if len(sorted_pkl_files) == 0:
-                dist.print0("No new checkpoint found! Going to sleep for 1min!")
-                time.sleep(60)
-                dist.print0("Woke up!")
-            
+                dist.print0("No new checkpoint found! Exiting!")
+                sys.exit(0)
+
             for checkpoint_number, checkpoint in zip(checkpoint_numbers, sorted_pkl_files):
                 # Rank 0 goes first.
                 if dist.get_rank() != 0:
