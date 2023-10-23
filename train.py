@@ -80,6 +80,7 @@ def parse_int_list(s):
 
 # noise
 @click.option('--sigma_nature', help='How much noise to add in the data', metavar='FLOAT', default=0.0, show_default=True)
+@click.option('--sigma_stop_consistency', help='Consistency Loss will be applied from sigma_nature to sigma_stop_consistency.', metavar='FLOAT', default=0.0, show_default=True)
 
 
 @click.option('--max_size', help='Limit training samples.', type=int, default=None, show_default=True)
@@ -182,6 +183,7 @@ def main(**kwargs):
         c.network_kwargs.class_name = 'training.networks.EDMPrecond'
         c.loss_kwargs.class_name = 'training.loss.NoisyAmbientLoss'
         c.loss_kwargs.sigma_nature = opts.sigma_nature
+        c.loss_kwargs.sigma_stop_consistency = opts.sigma_stop_consistency
     elif opts.precond == 'ambient':
         c.network_kwargs.class_name = 'training.networks.EDMPrecond'
         c.loss_kwargs.class_name = 'training.loss.AmbientLoss'

@@ -11,6 +11,8 @@
 import torch
 from torch_utils import persistence
 import numpy as np
+from torch_utils.misc import edm_schedule
+from training.samplers import backward_sde_sampler
 
 #----------------------------------------------------------------------------
 # Loss function corresponding to the variance preserving (VP) formulation
@@ -116,11 +118,13 @@ class NoisyEDMLoss:
 
 @persistence.persistent_class
 class NoisyAmbientLoss:
-    def __init__(self, P_mean=-1.2, P_std=1.2, sigma_data=0.5, sigma_nature=0.3):
+    def __init__(self, P_mean=-1.2, P_std=1.2, sigma_data=0.5, sigma_nature=0.3, sigma_stop_consistency=0.3, lambda_consistency=100.0):
         self.P_mean = P_mean
         self.P_std = P_std
         self.sigma_data = sigma_data
         self.sigma_nature = sigma_nature
+        self.sigma_stop_consistency = sigma_stop_consistency
+        self.lambda_consistency = lambda_consistency
 
     def __call__(self, net, images, labels=None, augment_pipe=None, **kwargs):
         rnd_normal = torch.randn([images.shape[0], 1, 1, 1], device=images.device)
@@ -145,7 +149,32 @@ class NoisyAmbientLoss:
         predicted_target = torch.where(desired_sigma < self.sigma_nature, noisy_image, predicted_target)
 
         # train to predict y
-        loss = weight * ((predicted_target - y) ** 2)
+        dsm_loss = weight * ((predicted_target - y) ** 2)
+
+        # make loss zero in the points that are between self.sigma_nature, self.sigma_stop_consistency
+        dsm_loss = torch.where( (desired_sigma <= self.sigma_nature) * (desired_sigma >= self.sigma_stop_consistency), torch.zeros_like(dsm_loss), dsm_loss)
+        
+        rep_y = y.repeat([2, 1, 1, 1])
+        rep_labels = labels.repeat([2, 1])
+        rep_augment_labels = augment_labels.repeat([2, 1])
+        times = edm_schedule(sigma_max=self.sigma_nature, sigma_min=self.sigma_stop_consistency, num_steps=y.shape[0] + 1)
+        times = times[:, None, None, None]
+        starting_time = times[:-1].repeat([2, 1, 1, 1])
+        finish_time = times[1:].repeat([2, 1, 1, 1])
+        
+        next_points, denoised = backward_sde_sampler(net, torch.cat([rep_y, torch.ones_like(rep_y)], axis=1), rep_labels, starting_time, finish_time, augment_labels=rep_augment_labels)
+        next_points = next_points[:, :3]
+        denoised = denoised[:denoised.shape[0]//2, :3]
+
+
+        cat_input = torch.cat([next_points, torch.ones_like(next_points)], axis=1)
+        next_points_preds = net(cat_input, finish_time, rep_labels, augment_labels=rep_augment_labels)[:, :3]
+        preds_1 = next_points_preds[:next_points.shape[0] // 2]
+        preds_2 = next_points_preds[-next_points.shape[0] // 2:]
+
+        consistency_loss = (preds_1 - denoised) * (preds_2 - denoised)
+
+        loss = dsm_loss + self.lambda_consistency * consistency_loss
         return loss, loss, loss
 
 
